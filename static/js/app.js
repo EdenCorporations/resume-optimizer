@@ -123,8 +123,9 @@
     });
 
     function handleFile(file) {
-        if (!file.name.endsWith('.docx')) {
-            alert('Please upload a .docx file');
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (ext !== 'docx' && ext !== 'pdf') {
+            alert('Please upload a .docx or .pdf file');
             return;
         }
         selectedFile = file;
@@ -147,7 +148,7 @@
         e.preventDefault();
 
         if (!selectedFile) {
-            alert('Please upload your resume (.docx)');
+            alert('Please upload your resume (.docx or .pdf)');
             return;
         }
 
@@ -242,6 +243,36 @@
         const tone = data.research_summary?.cultural_tone || 'balanced';
         DOM.resultsSummary.textContent =
             `Analysis complete for ${company} • Cultural tone: ${tone}`;
+
+        // Process Notes (image-heavy rebuild banner)
+        const processNotes = data.process_notes || [];
+        let existingBanner = document.getElementById('processNotesBanner');
+        if (existingBanner) existingBanner.remove();
+        if (processNotes.length > 0) {
+            const banner = document.createElement('div');
+            banner.id = 'processNotesBanner';
+            banner.style.cssText = `
+                background: linear-gradient(135deg, #1e3a5f, #2a5298);
+                border: 1px solid rgba(100, 160, 255, 0.3);
+                border-radius: 12px;
+                padding: 16px 20px;
+                margin-bottom: 24px;
+                color: #e0ecff;
+                font-size: 0.95rem;
+                line-height: 1.5;
+                display: flex;
+                align-items: flex-start;
+                gap: 12px;
+            `;
+            banner.innerHTML = `
+                <span style="font-size: 1.3rem; flex-shrink: 0;">ℹ️</span>
+                <div>
+                    ${processNotes.map(n => `<p style="margin: 0;">${escapeHtml(n)}</p>`).join('')}
+                    ${data.source_type ? `<p style="margin: 4px 0 0; opacity: 0.7; font-size: 0.85rem;">Source: ${escapeHtml(data.source_type)}</p>` : ''}
+                </div>
+            `;
+            DOM.scoresGrid.parentNode.insertBefore(banner, DOM.scoresGrid);
+        }
 
         // Scores
         const scores = data.scores || {};

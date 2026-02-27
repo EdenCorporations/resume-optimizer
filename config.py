@@ -26,6 +26,9 @@ class Config:
     # Vercel AI Gateway (free $5/mo credit, auto-OIDC on Vercel)
     AI_GATEWAY_API_KEY = os.getenv("AI_GATEWAY_API_KEY", "")
 
+    # OpenRouter (free vision model for image classification)
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
     # Research APIs (all optional — free tiers)
     BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
     FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")

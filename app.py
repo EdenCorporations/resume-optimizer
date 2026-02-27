@@ -18,6 +18,7 @@ from flask import Flask, request, jsonify, send_file, render_template, redirect,
 
 from config import Config
 from src.blob_storage import BlobStorage
+from src.document_processor import DocumentProcessor
 from src.research_engine import ResearchEngine
 from src.llm_analyzer import LLMAnalyzer
 from src.resume_editor import ResumeEditor
@@ -40,7 +41,7 @@ app.config["SECRET_KEY"] = Config.SECRET_KEY
 # Initialize blob storage (auto-detects Vercel vs local)
 blob_storage = BlobStorage()
 
-ALLOWED_EXTENSIONS = {"docx"}
+ALLOWED_EXTENSIONS = {"docx", "pdf"}
 
 
 def allowed_file(filename: str) -> bool:
@@ -78,7 +79,7 @@ def analyze():
 
         file = request.files["resume"]
         if file.filename == "" or not allowed_file(file.filename):
-            return jsonify({"error": "Please upload a .docx file"}), 400
+            return jsonify({"error": "Please upload a .docx or .pdf file"}), 400
 
         job_title = request.form.get("job_title", "").strip()
         job_description = request.form.get("job_description", "").strip()
@@ -107,15 +108,33 @@ def analyze():
         file_bytes = file.read()
         logger.info("Read uploaded file: %s (%d bytes)", original_name, len(file_bytes))
 
-        # --- Step 1: Extract resume text (from bytes, no disk needed) ---
-        editor = ResumeEditor(file_bytes)
-        resume_text = editor.extract_text()
-        logger.info("Extracted %d characters from resume", len(resume_text))
+        # --- Step 1: Process document (PDF/DOCX → text + image analysis) ---
+        processor = DocumentProcessor(
+            openrouter_api_key=Config.OPENROUTER_API_KEY,
+        )
+        processing_result = processor.process(file_bytes, original_name)
+        resume_text = processing_result.text
+        logger.info(
+            "Processed document: %d chars, source=%s, images=%d",
+            len(resume_text), processing_result.source_type,
+            processing_result.images_found,
+        )
+
+        # Override auto_apply if processor flagged image-heavy content
+        if processing_result.auto_apply_override is not None:
+            auto_apply = processing_result.auto_apply_override
+            if not auto_apply:
+                logger.info("auto_apply disabled by DocumentProcessor (image-heavy resume)")
 
         if len(resume_text) < 50:
             return jsonify({
-                "error": "The uploaded document appears to be empty or too short."
+                "error": "The uploaded document appears to be empty or too short. "
+                         "If this is a scanned/image PDF, ensure Tesseract OCR is installed."
             }), 400
+
+        # Keep a ResumeEditor for DOCX auto-apply (PDF can't be edited in-place)
+        file_ext = original_name.rsplit('.', 1)[-1].lower() if '.' in original_name else ''
+        editor = ResumeEditor(file_bytes) if file_ext == 'docx' else None
 
         # --- Step 2: Web Research ---
         research_engine = ResearchEngine()
@@ -138,10 +157,10 @@ def analyze():
             success_profile=success_profile,
         )
 
-        # --- Step 4: Apply suggestions (if auto-apply) ---
+        # --- Step 4: Apply suggestions (if auto-apply, DOCX only) ---
         optimized_resume_url = None
         edit_results = None
-        if auto_apply and analysis.get("suggestions"):
+        if auto_apply and analysis.get("suggestions") and editor is not None:
             edit_results = editor.apply_suggestions(analysis["suggestions"])
 
             # Save optimized resume to BytesIO, then upload
@@ -208,6 +227,8 @@ def analyze():
                 "company": company_name or "Not specified",
                 "cultural_tone": success_profile.get("cultural_tone", "balanced"),
             },
+            "process_notes": processing_result.process_notes,
+            "source_type": processing_result.source_type,
         }
 
         return jsonify(response)
