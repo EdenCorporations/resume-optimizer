@@ -30,6 +30,12 @@ class Config:
     BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
     FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 
+    # OpenRouter API (for vision classification / OCR — free model)
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_MODEL = os.getenv(
+        "OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free"
+    )
+
     # Paths (used in local/dev mode only)
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")

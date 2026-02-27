@@ -1,6 +1,7 @@
 
 import unittest
 import os
+import io
 import json
 from unittest.mock import patch, MagicMock
 
@@ -13,6 +14,8 @@ from src.research_engine import ResearchEngine
 from src.llm_analyzer import LLMAnalyzer
 from src.resume_editor import ResumeEditor
 from src.pdf_generator import PDFGenerator
+from src.vision_processor import VisionProcessor
+from src.document_processor import DocumentProcessor, ProcessingResult
 from docx import Document
 
 class TestResumeOptimizer(unittest.TestCase):
@@ -211,6 +214,128 @@ class TestResumeOptimizer(unittest.TestCase):
         gen.generate_talking_points_pdf(suggestions, self.job_title, tp_path)
         self.assertTrue(os.path.exists(tp_path))
         print(f"Generated {tp_path}")
+
+    def test_6_vision_processor_classification(self):
+        """Test VisionProcessor image classification with mocked OpenRouter."""
+        print("\n--- Testing Vision Processor (Classification, Mocked) ---")
+
+        vp = VisionProcessor(api_key="fake-key", model="nvidia/nemotron-nano-12b-v2-vl:free")
+
+        # Mock the HTTP call
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": '{"type": "headshot", "confidence": 0.95}'}}]
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            result = vp.classify_image(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100, "image/png")
+
+            self.assertEqual(result["type"], "headshot")
+            self.assertGreater(result["confidence"], 0.9)
+            print(f"Classification result: {result}")
+
+    def test_7_vision_processor_ocr(self):
+        """Test VisionProcessor OCR with mocked OpenRouter."""
+        print("\n--- Testing Vision Processor (OCR, Mocked) ---")
+
+        vp = VisionProcessor(api_key="fake-key", model="nvidia/nemotron-nano-12b-v2-vl:free")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "John Doe\nSenior Software Engineer\n- Python, Docker"}}]
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            text = vp.ocr_image(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100, "image/png")
+
+            self.assertIn("John Doe", text)
+            self.assertIn("Senior Software Engineer", text)
+            print(f"OCR extracted text: {text[:100]}")
+
+    def test_8_vision_processor_disabled(self):
+        """Test VisionProcessor graceful fallback when no API key."""
+        print("\n--- Testing Vision Processor (No API Key) ---")
+
+        vp = VisionProcessor(api_key="", model="")
+
+        result = vp.classify_image(b"\x89PNG" + b"\x00" * 100)
+        self.assertEqual(result["type"], "resume_content")
+        self.assertEqual(result["confidence"], 0.5)
+
+        text = vp.ocr_image(b"\x89PNG" + b"\x00" * 100)
+        self.assertEqual(text, "")
+        print("Graceful fallback works correctly.")
+
+    def test_9_document_processor_docx(self):
+        """Test DocumentProcessor with DOCX file."""
+        print("\n--- Testing Document Processor (DOCX) ---")
+
+        if not os.path.exists(self.test_docx_path):
+            self.skipTest("Test DOCX not found")
+
+        with open(self.test_docx_path, "rb") as f:
+            docx_bytes = f.read()
+
+        # Use processor with no OpenRouter key (skips vision)
+        processor = DocumentProcessor(openrouter_api_key="", openrouter_model="")
+        result = processor.process(docx_bytes, "test_resume.docx")
+
+        self.assertEqual(result.file_type, "docx")
+        self.assertIn("John Doe", result.text)
+        self.assertIsInstance(result.process_notes, list)
+        print(f"DOCX processed: {len(result.text)} chars, images={result.has_images}")
+
+    def test_10_document_processor_pdf_mock(self):
+        """Test DocumentProcessor PDF path with mocked libraries."""
+        print("\n--- Testing Document Processor (PDF, Mocked) ---")
+
+        processor = DocumentProcessor(openrouter_api_key="", openrouter_model="")
+
+        # Create a minimal mock for the PDF processing
+        fake_pdf_bytes = b"%PDF-1.4 fake"
+
+        with patch("pdfplumber.open") as mock_plumber, \
+             patch("fitz.open") as mock_fitz:
+
+            # Mock pdfplumber
+            mock_page = MagicMock()
+            mock_page.extract_text.return_value = "Jane Smith\nSoftware Developer\nPython, React"
+            mock_pdf = MagicMock()
+            mock_pdf.pages = [mock_page]
+            mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+            mock_pdf.__exit__ = MagicMock(return_value=False)
+            mock_plumber.return_value = mock_pdf
+
+            # Mock PyMuPDF (no images)
+            mock_doc = MagicMock()
+            mock_doc.__len__ = MagicMock(return_value=1)
+            mock_fitz_page = MagicMock()
+            mock_fitz_page.get_images.return_value = []
+            mock_doc.__getitem__ = MagicMock(return_value=mock_fitz_page)
+            mock_doc.close = MagicMock()
+            mock_fitz.return_value = mock_doc
+
+            result = processor.process(fake_pdf_bytes, "resume.pdf")
+
+            self.assertEqual(result.file_type, "pdf")
+            self.assertIn("Jane Smith", result.text)
+            self.assertFalse(result.has_images)
+            print(f"PDF processed: {len(result.text)} chars")
+
 
 if __name__ == '__main__':
     unittest.main()

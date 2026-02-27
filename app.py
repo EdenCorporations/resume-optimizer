@@ -21,7 +21,9 @@ from src.blob_storage import BlobStorage
 from src.research_engine import ResearchEngine
 from src.llm_analyzer import LLMAnalyzer
 from src.resume_editor import ResumeEditor
+from src.pdf_editor import PdfEditor
 from src.pdf_generator import PDFGenerator
+from src.document_processor import DocumentProcessor
 
 # ------------------------------------------------------------------ #
 #  Setup
@@ -40,7 +42,7 @@ app.config["SECRET_KEY"] = Config.SECRET_KEY
 # Initialize blob storage (auto-detects Vercel vs local)
 blob_storage = BlobStorage()
 
-ALLOWED_EXTENSIONS = {"docx"}
+ALLOWED_EXTENSIONS = {"docx", "pdf"}
 
 
 def allowed_file(filename: str) -> bool:
@@ -78,7 +80,7 @@ def analyze():
 
         file = request.files["resume"]
         if file.filename == "" or not allowed_file(file.filename):
-            return jsonify({"error": "Please upload a .docx file"}), 400
+            return jsonify({"error": "Please upload a .docx or .pdf file"}), 400
 
         job_title = request.form.get("job_title", "").strip()
         job_description = request.form.get("job_description", "").strip()
@@ -105,12 +107,26 @@ def analyze():
         # Keep only safe chars
         original_name = "".join(c for c in original_name if c.isalnum() or c in "._-")
         file_bytes = file.read()
-        logger.info("Read uploaded file: %s (%d bytes)", original_name, len(file_bytes))
+        file_ext = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else ""
+        logger.info("Read uploaded file: %s (%d bytes, type: %s)", original_name, len(file_bytes), file_ext)
 
-        # --- Step 1: Extract resume text (from bytes, no disk needed) ---
-        editor = ResumeEditor(file_bytes)
-        resume_text = editor.extract_text()
-        logger.info("Extracted %d characters from resume", len(resume_text))
+        # --- Step 1: Process document (extract text, handle images) ---
+        doc_processor = DocumentProcessor(
+            openrouter_api_key=Config.OPENROUTER_API_KEY,
+            openrouter_model=Config.OPENROUTER_MODEL,
+        )
+        processing_result = doc_processor.process(file_bytes, original_name)
+        resume_text = processing_result.text
+        process_notes = processing_result.process_notes
+        logger.info(
+            "Extracted %d characters (type=%s, images=%s, image_heavy=%s)",
+            len(resume_text), file_ext, processing_result.has_images, processing_result.image_heavy,
+        )
+
+        # Override auto-apply if document processor says so (image-heavy)
+        if processing_result.auto_apply_override is not None:
+            auto_apply = processing_result.auto_apply_override
+            logger.info("Auto-apply overridden to %s by document processor", auto_apply)
 
         if len(resume_text) < 50:
             return jsonify({
@@ -142,12 +158,23 @@ def analyze():
         optimized_resume_url = None
         edit_results = None
         if auto_apply and analysis.get("suggestions"):
-            edit_results = editor.apply_suggestions(analysis["suggestions"])
-
-            # Save optimized resume to BytesIO, then upload
-            optimized_buffer = editor.save_to_bytesio()
-            optimized_filename = f"{session_id}_optimized_{original_name}"
-            optimized_resume_url = blob_storage.save_docx(optimized_buffer, optimized_filename)
+            if file_ext == "pdf":
+                # Use PdfEditor for in-place PDF editing
+                pdf_editor = PdfEditor(file_bytes)
+                edit_results = pdf_editor.apply_suggestions(analysis["suggestions"])
+                optimized_buffer = pdf_editor.save_to_bytesio()
+                optimized_filename = f"{session_id}_optimized_{original_name}"
+                optimized_resume_url = blob_storage.upload_file(
+                    optimized_buffer.getvalue(), optimized_filename, "application/pdf"
+                )
+                pdf_editor.close()
+            else:
+                # Use existing ResumeEditor for DOCX
+                editor = ResumeEditor(file_bytes)
+                edit_results = editor.apply_suggestions(analysis["suggestions"])
+                optimized_buffer = editor.save_to_bytesio()
+                optimized_filename = f"{session_id}_optimized_{original_name}"
+                optimized_resume_url = blob_storage.save_docx(optimized_buffer, optimized_filename)
             logger.info("Optimized resume stored: %s", optimized_resume_url)
 
         # --- Step 5: Generate PDFs (all in-memory) ---
@@ -208,6 +235,8 @@ def analyze():
                 "company": company_name or "Not specified",
                 "cultural_tone": success_profile.get("cultural_tone", "balanced"),
             },
+            "file_type": file_ext,
+            "process_notes": process_notes,
         }
 
         return jsonify(response)
