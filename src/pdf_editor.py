@@ -108,11 +108,9 @@ class PdfEditor:
         """
         Find text in the PDF and replace it in-place using redaction.
 
-        Strategy:
-        1. Search each page for the old text
-        2. Get font properties from the text spans at that location
-        3. Redact the area (removes text, fills with page background)
-        4. Insert new text with the same font properties
+        Uses PyMuPDF's atomic redact-with-replacement: the redaction annotation
+        itself carries the replacement text, so removing old content and inserting
+        new content happen in a single apply_redactions() call — no gap, no blanks.
 
         Returns:
             True if replacement was made, False if text not found
@@ -122,72 +120,116 @@ class PdfEditor:
 
             # Try exact search first
             text_instances = page.search_for(old_text)
+            search_text = old_text
             if not text_instances:
                 # Try normalized whitespace matching
-                normalized = re.sub(r'\s+', ' ', old_text).strip()
-                text_instances = page.search_for(normalized)
+                search_text = re.sub(r'\s+', ' ', old_text).strip()
+                text_instances = page.search_for(search_text)
 
             if not text_instances:
                 continue
 
-            # Use the first match
-            rect = text_instances[0]
+            # Collect font info from ALL matching rects BEFORE redacting
+            # (redacting destroys the text, so we must read first)
+            all_font_info = []
+            for inst_rect in text_instances:
+                info = self._get_font_info_at_rect(page, inst_rect)
+                all_font_info.append(info)
 
-            # If multiple rects (multi-line), union them
-            if len(text_instances) > 1:
-                # Check if they're close together (same text block)
-                union_rect = fitz.Rect(rect)
-                for r in text_instances[1:]:
-                    # Only union nearby rects (within ~50 pts vertically)
-                    if abs(r.y0 - rect.y0) < 50:
-                        union_rect |= r
-                rect = union_rect
+            # Use the first match's font info as the canonical style
+            font_info = all_font_info[0] if all_font_info else {
+                "font": "helv", "size": 11, "color": (0, 0, 0)
+            }
 
-            # Get font properties from the text at this location
-            font_info = self._get_font_info_at_rect(page, rect)
-
-            # Apply redaction to remove old text
-            page.add_redact_annot(rect, text="", fill=(1, 1, 1))  # white fill
-            page.apply_redactions(images=0)  # 0 = PDF_REDACT_IMAGE_NONE
-
-            # Insert replacement text with matching font properties
             fontname = font_info.get("font", "helv")
             fontsize = font_info.get("size", 11)
             color = font_info.get("color", (0, 0, 0))
-
-            # Map common PDF font names to fitz built-in names
             fitz_fontname = self._map_fontname(fontname)
 
-            # Calculate insertion point (top-left of the rect + baseline offset)
-            insert_point = fitz.Point(rect.x0, rect.y0 + fontsize)
+            # Detect page background color for fill (most resumes are white)
+            bg_color = self._get_bg_color(page, text_instances[0])
 
-            # For multi-line text, use text writer for better control
-            if "\n" in new_text or len(new_text) > 80:
-                self._insert_multiline_text(
-                    page, rect, new_text, fitz_fontname, fontsize, color
-                )
-            else:
-                try:
-                    page.insert_text(
-                        insert_point,
-                        new_text,
-                        fontname=fitz_fontname,
-                        fontsize=fontsize,
-                        color=color,
-                    )
-                except Exception as e:
-                    logger.warning("insert_text failed (%s), using helv fallback", e)
-                    page.insert_text(
-                        insert_point,
-                        new_text,
-                        fontname="helv",
-                        fontsize=fontsize,
-                        color=color,
+            # search_for may return multiple rects for the SAME text occurrence
+            # (one rect per line if the text wraps). We need to figure out which
+            # rects belong to our single match vs. truly separate occurrences.
+            # Strategy: if rects are vertically adjacent (within 2× font height),
+            # they're part of the same wrapped text block.
+            match_rects = [text_instances[0]]
+            if len(text_instances) > 1:
+                last_rect = text_instances[0]
+                for r in text_instances[1:]:
+                    if abs(r.y0 - last_rect.y1) < fontsize * 2:
+                        match_rects.append(r)
+                        last_rect = r
+                    else:
+                        break  # separate occurrence, stop
+
+            # Apply redaction to each rect in the match.
+            # Put replacement text ONLY on the first rect's annotation.
+            for i, rect in enumerate(match_rects):
+                if i == 0:
+                    # First rect: carry the replacement text
+                    try:
+                        page.add_redact_annot(
+                            rect,
+                            text=new_text,
+                            fontname=fitz_fontname,
+                            fontsize=0,  # 0 = auto-fit to rect height
+                            text_color=color,
+                            fill=bg_color,
+                            cross_out=False,
+                        )
+                    except Exception:
+                        # Fallback: use helv if the mapped font fails
+                        page.add_redact_annot(
+                            rect,
+                            text=new_text,
+                            fontname="helv",
+                            fontsize=0,
+                            text_color=color,
+                            fill=bg_color,
+                            cross_out=False,
+                        )
+                else:
+                    # Subsequent rects (wrapped lines): just clear them
+                    page.add_redact_annot(
+                        rect,
+                        text="",
+                        fill=bg_color,
+                        cross_out=False,
                     )
 
+            # Apply all redactions atomically — this removes old text and
+            # places replacement text in one operation
+            page.apply_redactions(images=0)  # 0 = don't touch images
+
+            logger.info(
+                "Replaced text on page %d (%d rects, font=%s, size=%.1f)",
+                page_num + 1, len(match_rects), fitz_fontname, fontsize,
+            )
             return True
 
         return False
+
+    def _get_bg_color(self, page, rect: fitz.Rect) -> tuple:
+        """
+        Try to detect the background color behind a text rect.
+        Falls back to white (1,1,1) for most resumes.
+        """
+        try:
+            # Sample a point just outside the text rect for background
+            # Check if there are any filled rects/drawings behind the text
+            drawings = page.get_drawings()
+            for d in drawings:
+                if d.get("fill") and d.get("rect"):
+                    d_rect = fitz.Rect(d["rect"])
+                    if d_rect.contains(rect):
+                        fill = d["fill"]
+                        if isinstance(fill, (list, tuple)) and len(fill) >= 3:
+                            return tuple(fill[:3])
+        except Exception:
+            pass
+        return (1, 1, 1)  # white default
 
     def _get_font_info_at_rect(self, page, rect: fitz.Rect) -> dict:
         """
