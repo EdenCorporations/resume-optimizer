@@ -149,9 +149,6 @@ class PdfEditor:
             origin = font_info.get("origin")  # fitz.Point or None
             fitz_fontname = self._map_fontname(fontname)
 
-            # Detect page background colour for the fill rectangle
-            bg_color = self._get_bg_color(page, text_instances[0])
-
             # Group rects that belong to the same visual match
             # (search_for may split wrapped text into multiple rects)
             match_rects = [text_instances[0]]
@@ -164,12 +161,14 @@ class PdfEditor:
                     else:
                         break  # separate occurrence, stop
 
-            # ── Step 2: Redact – blank out old text ─────────────────────
+            # ── Step 2: Redact – remove old text without painting a fill ──
+            # Using fill=False avoids leaving a visible white rectangle when
+            # the replacement text is shorter than the original.
             for rect in match_rects:
                 page.add_redact_annot(
                     rect,
-                    text="",            # empty – no replacement text in annot
-                    fill=bg_color,
+                    text="",
+                    fill=False,
                     cross_out=False,
                 )
 
