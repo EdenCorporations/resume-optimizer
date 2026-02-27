@@ -106,11 +106,15 @@ class PdfEditor:
 
     def _find_and_replace(self, old_text: str, new_text: str) -> bool:
         """
-        Find text in the PDF and replace it in-place using redaction.
+        Find text in the PDF and replace it in-place using redact-then-insert.
 
-        Uses PyMuPDF's atomic redact-with-replacement: the redaction annotation
-        itself carries the replacement text, so removing old content and inserting
-        new content happen in a single apply_redactions() call — no gap, no blanks.
+        Two-step approach for reliable text placement:
+        1. Read span-level font/origin info *before* any mutation.
+        2. Redact (white-out) the old text with an empty redaction annotation.
+        3. Insert new text at the *exact* baseline origin using ``insert_text``.
+
+        This avoids the unreliable ``add_redact_annot(text=...)`` parameter
+        which places replacement text at wrong positions.
 
         Returns:
             True if replacement was made, False if text not found
@@ -120,40 +124,36 @@ class PdfEditor:
 
             # Try exact search first
             text_instances = page.search_for(old_text)
-            search_text = old_text
             if not text_instances:
                 # Try normalized whitespace matching
-                search_text = re.sub(r'\s+', ' ', old_text).strip()
-                text_instances = page.search_for(search_text)
+                normalized = re.sub(r'\s+', ' ', old_text).strip()
+                text_instances = page.search_for(normalized)
 
             if not text_instances:
                 continue
 
-            # Collect font info from ALL matching rects BEFORE redacting
-            # (redacting destroys the text, so we must read first)
+            # ── Step 1: Collect font info BEFORE redacting ──────────────
+            # (Redaction destroys text, so we must capture metadata first)
             all_font_info = []
             for inst_rect in text_instances:
                 info = self._get_font_info_at_rect(page, inst_rect)
                 all_font_info.append(info)
 
-            # Use the first match's font info as the canonical style
             font_info = all_font_info[0] if all_font_info else {
-                "font": "helv", "size": 11, "color": (0, 0, 0)
+                "font": "helv", "size": 11, "color": (0, 0, 0), "origin": None,
             }
 
             fontname = font_info.get("font", "helv")
             fontsize = font_info.get("size", 11)
             color = font_info.get("color", (0, 0, 0))
+            origin = font_info.get("origin")  # fitz.Point or None
             fitz_fontname = self._map_fontname(fontname)
 
-            # Detect page background color for fill (most resumes are white)
+            # Detect page background colour for the fill rectangle
             bg_color = self._get_bg_color(page, text_instances[0])
 
-            # search_for may return multiple rects for the SAME text occurrence
-            # (one rect per line if the text wraps). We need to figure out which
-            # rects belong to our single match vs. truly separate occurrences.
-            # Strategy: if rects are vertically adjacent (within 2× font height),
-            # they're part of the same wrapped text block.
+            # Group rects that belong to the same visual match
+            # (search_for may split wrapped text into multiple rects)
             match_rects = [text_instances[0]]
             if len(text_instances) > 1:
                 last_rect = text_instances[0]
@@ -164,44 +164,40 @@ class PdfEditor:
                     else:
                         break  # separate occurrence, stop
 
-            # Apply redaction to each rect in the match.
-            # Put replacement text ONLY on the first rect's annotation.
-            for i, rect in enumerate(match_rects):
-                if i == 0:
-                    # First rect: carry the replacement text
-                    try:
-                        page.add_redact_annot(
-                            rect,
-                            text=new_text,
-                            fontname=fitz_fontname,
-                            fontsize=0,  # 0 = auto-fit to rect height
-                            text_color=color,
-                            fill=bg_color,
-                            cross_out=False,
-                        )
-                    except Exception:
-                        # Fallback: use helv if the mapped font fails
-                        page.add_redact_annot(
-                            rect,
-                            text=new_text,
-                            fontname="helv",
-                            fontsize=0,
-                            text_color=color,
-                            fill=bg_color,
-                            cross_out=False,
-                        )
-                else:
-                    # Subsequent rects (wrapped lines): just clear them
-                    page.add_redact_annot(
-                        rect,
-                        text="",
-                        fill=bg_color,
-                        cross_out=False,
-                    )
+            # ── Step 2: Redact – blank out old text ─────────────────────
+            for rect in match_rects:
+                page.add_redact_annot(
+                    rect,
+                    text="",            # empty – no replacement text in annot
+                    fill=bg_color,
+                    cross_out=False,
+                )
 
-            # Apply all redactions atomically — this removes old text and
-            # places replacement text in one operation
             page.apply_redactions(images=0)  # 0 = don't touch images
+
+            # ── Step 3: Insert new text at exact original baseline ──────
+            if origin is None:
+                # Fallback: approximate baseline from rect top + font size
+                first_rect = match_rects[0]
+                origin = fitz.Point(first_rect.x0, first_rect.y0 + fontsize)
+
+            try:
+                page.insert_text(
+                    origin,
+                    new_text,
+                    fontname=fitz_fontname,
+                    fontsize=fontsize,
+                    color=color,
+                )
+            except Exception:
+                # Fallback: try with default Helvetica
+                page.insert_text(
+                    origin,
+                    new_text,
+                    fontname="helv",
+                    fontsize=fontsize,
+                    color=color,
+                )
 
             logger.info(
                 "Replaced text on page %d (%d rects, font=%s, size=%.1f)",
@@ -233,11 +229,14 @@ class PdfEditor:
 
     def _get_font_info_at_rect(self, page, rect: fitz.Rect) -> dict:
         """
-        Extract font name, size, and color from text spans at the given rect.
+        Extract font name, size, color, and baseline origin from text spans
+        at the given rect.
 
         Uses page.get_text("dict") to get detailed span information.
+        The ``origin`` value is the text baseline point — the exact coordinate
+        that ``page.insert_text()`` needs for correct placement.
         """
-        default = {"font": "helv", "size": 11, "color": (0, 0, 0)}
+        default = {"font": "helv", "size": 11, "color": (0, 0, 0), "origin": None}
 
         try:
             text_dict = page.get_text("dict", clip=rect)
@@ -246,12 +245,18 @@ class PdfEditor:
                     for span in line.get("spans", []):
                         font = span.get("font", "helv")
                         size = span.get("size", 11)
+                        origin = span.get("origin")  # (x, y_baseline)
                         # Color is an int (sRGB), convert to (r,g,b) tuple 0-1
                         color_int = span.get("color", 0)
                         r = ((color_int >> 16) & 0xFF) / 255.0
                         g = ((color_int >> 8) & 0xFF) / 255.0
                         b = (color_int & 0xFF) / 255.0
-                        return {"font": font, "size": size, "color": (r, g, b)}
+                        return {
+                            "font": font,
+                            "size": size,
+                            "color": (r, g, b),
+                            "origin": fitz.Point(origin) if origin else None,
+                        }
         except Exception as e:
             logger.warning("Failed to extract font info: %s", e)
 
