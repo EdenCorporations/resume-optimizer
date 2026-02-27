@@ -22,6 +22,7 @@ from src.document_processor import DocumentProcessor
 from src.research_engine import ResearchEngine
 from src.llm_analyzer import LLMAnalyzer
 from src.resume_editor import ResumeEditor
+from src.pdf_editor import PDFEditor
 from src.pdf_generator import PDFGenerator
 
 # ------------------------------------------------------------------ #
@@ -132,9 +133,14 @@ def analyze():
                          "If this is a scanned/image PDF, ensure Tesseract OCR is installed."
             }), 400
 
-        # Keep a ResumeEditor for DOCX auto-apply (PDF can't be edited in-place)
+        # Select the editor based on file type for in-place modifications
         file_ext = original_name.rsplit('.', 1)[-1].lower() if '.' in original_name else ''
-        editor = ResumeEditor(file_bytes) if file_ext == 'docx' else None
+        if file_ext == 'docx':
+            editor = ResumeEditor(file_bytes)
+        elif file_ext == 'pdf':
+            editor = PDFEditor(file_bytes)
+        else:
+            editor = None
 
         # --- Step 2: Web Research ---
         research_engine = ResearchEngine()
@@ -166,7 +172,12 @@ def analyze():
             # Save optimized resume to BytesIO, then upload
             optimized_buffer = editor.save_to_bytesio()
             optimized_filename = f"{session_id}_optimized_{original_name}"
-            optimized_resume_url = blob_storage.save_docx(optimized_buffer, optimized_filename)
+            
+            if file_ext == 'pdf':
+                optimized_resume_url = blob_storage.save_pdf(optimized_buffer, optimized_filename)
+            else:
+                optimized_resume_url = blob_storage.save_docx(optimized_buffer, optimized_filename)
+                
             logger.info("Optimized resume stored: %s", optimized_resume_url)
 
         # --- Step 5: Generate PDFs (all in-memory) ---
