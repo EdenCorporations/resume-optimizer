@@ -181,23 +181,74 @@ class PdfEditor:
                 first_rect = match_rects[0]
                 origin = fitz.Point(first_rect.x0, first_rect.y0 + fontsize)
 
+            # Calculate available width from origin to right page margin.
+            # Mirror the left margin (origin.x) to the right side, with a
+            # minimum of 36 pt (0.5 in) so text never touches the edge.
+            page_rect = page.rect
+            left_margin = origin.x - page_rect.x0
+            right_margin_inset = max(left_margin, 36)
+            avail_width = page_rect.x1 - origin.x - right_margin_inset
+
+            # Measure how wide the new text would be as a single line
             try:
-                page.insert_text(
-                    origin,
-                    new_text,
-                    fontname=fitz_fontname,
-                    fontsize=fontsize,
-                    color=color,
+                text_length = fitz.get_text_length(
+                    new_text, fontname=fitz_fontname, fontsize=fontsize
                 )
             except Exception:
-                # Fallback: try with default Helvetica
-                page.insert_text(
-                    origin,
-                    new_text,
-                    fontname="helv",
-                    fontsize=fontsize,
-                    color=color,
+                text_length = fitz.get_text_length(
+                    new_text, fontname="helv", fontsize=fontsize
                 )
+                fitz_fontname = "helv"
+
+            needs_wrap = text_length > avail_width and avail_width > 0
+
+            if needs_wrap:
+                # Use insert_textbox for automatic word-wrapping.
+                # Build a rect from origin that extends to the right margin
+                # and far enough down to accommodate wrapped lines.
+                ascender = fontsize * 0.9   # approximate ascender height
+                tb_rect = fitz.Rect(
+                    origin.x,
+                    origin.y - ascender,            # top = baseline − ascender
+                    origin.x + avail_width,
+                    page_rect.y1 - 36,              # extend to bottom margin
+                )
+                try:
+                    page.insert_textbox(
+                        tb_rect,
+                        new_text,
+                        fontname=fitz_fontname,
+                        fontsize=fontsize,
+                        color=color,
+                        align=fitz.TEXT_ALIGN_LEFT,
+                    )
+                except Exception:
+                    page.insert_textbox(
+                        tb_rect,
+                        new_text,
+                        fontname="helv",
+                        fontsize=fontsize,
+                        color=color,
+                        align=fitz.TEXT_ALIGN_LEFT,
+                    )
+            else:
+                # Single line fits — use insert_text at exact baseline
+                try:
+                    page.insert_text(
+                        origin,
+                        new_text,
+                        fontname=fitz_fontname,
+                        fontsize=fontsize,
+                        color=color,
+                    )
+                except Exception:
+                    page.insert_text(
+                        origin,
+                        new_text,
+                        fontname="helv",
+                        fontsize=fontsize,
+                        color=color,
+                    )
 
             logger.info(
                 "Replaced text on page %d (%d rects, font=%s, size=%.1f)",
