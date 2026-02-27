@@ -97,13 +97,14 @@ class PDFEditor:
                     
                     span = self._get_text_formatting(page, rect)
                     if span:
-                        orig_font = span.get("font", "").lower()
-                        if "bold" in orig_font:
-                            fontname = "hebo"  # Helvetica-Bold
-                        elif "times" in orig_font:
-                            fontname = "tiro"  # Times-Roman
+                        orig_font = span.get("font", "")
+                        fontname = self._map_font(orig_font)
                         
                         fontsize = span.get("size", 11)
+                        # sometimes PyMuPDF size is slightly smaller than what redaction expects
+                        if fontsize < 12:
+                            fontsize += 0.5 
+                        
                         color = self._int_to_rgb(span.get("color", 0))
                     
                     # Add a redation annotation (white fill, original colored text)
@@ -126,18 +127,51 @@ class PDFEditor:
     def _get_text_formatting(self, page, rect) -> Optional[dict]:
         """
         Attempt to find the exact text span overlapping with the given rect 
-        to extract font face, size, and color.
+        to extract font face, size, and color by calculating intersection area.
         """
+        best_span = None
+        max_overlap = 0.0
+        
         blocks = page.get_text("dict")["blocks"]
         for b in blocks:
             if "lines" in b:
                 for l in b["lines"]:
                     for s in l["spans"]:
                         span_rect = fitz.Rect(s["bbox"])
-                        # If the span vertically aligns with the search rect and overlaps horizontally
-                        if abs(span_rect.y0 - rect.y0) < 5 and (span_rect.x0 <= rect.x1 and span_rect.x1 >= rect.x0):
-                            return s
-        return None
+                        overlap_rect = span_rect.intersect(rect)
+                        
+                        if not overlap_rect.is_empty:
+                            overlap_area = overlap_rect.get_area()
+                            if overlap_area > max_overlap:
+                                max_overlap = overlap_area
+                                best_span = s
+        
+        return best_span
+
+    def _map_font(self, font_name: str) -> str:
+        """Map extracted font name to PyMuPDF's Base-14 font references."""
+        font_name = font_name.lower()
+        
+        is_bold = "bold" in font_name or "blk" in font_name or "heavy" in font_name
+        is_italic = "italic" in font_name or "oblique" in font_name
+        
+        if "times" in font_name or "serif" in font_name or "georgia" in font_name or "garamond" in font_name:
+            if is_bold and is_italic: return "tibi"
+            if is_bold: return "tibo"
+            if is_italic: return "tiit"
+            return "tiro"
+        
+        if "courier" in font_name or "mono" in font_name or "console" in font_name:
+            if is_bold and is_italic: return "cobi"
+            if is_bold: return "cobo"
+            if is_italic: return "coit"
+            return "cour"
+            
+        # Default to Helvetica (sans-serif)
+        if is_bold and is_italic: return "hebi"
+        if is_bold: return "hebo"
+        if is_italic: return "heit"
+        return "helv"
 
     def _int_to_rgb(self, color_int) -> tuple[float, float, float]:
         """Convert PyMuPDF color int to (r, g, b) floats [0.0 - 1.0]"""
