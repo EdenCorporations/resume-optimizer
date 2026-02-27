@@ -71,6 +71,10 @@
         downloadsBar: document.getElementById('downloadsBar'),
         downloadsButtons: document.getElementById('downloadsButtons'),
 
+        // Process Notes
+        processNotesPanel: document.getElementById('processNotesPanel'),
+        processNotesText: document.getElementById('processNotesText'),
+
         // Buttons
         restartBtn: document.getElementById('restartBtn'),
         errorRetryBtn: document.getElementById('errorRetryBtn'),
@@ -123,8 +127,9 @@
     });
 
     function handleFile(file) {
-        if (!file.name.endsWith('.docx')) {
-            alert('Please upload a .docx file');
+        const name = file.name.toLowerCase();
+        if (!name.endsWith('.docx') && !name.endsWith('.pdf')) {
+            alert('Please upload a .docx or .pdf file');
             return;
         }
         selectedFile = file;
@@ -147,7 +152,7 @@
         e.preventDefault();
 
         if (!selectedFile) {
-            alert('Please upload your resume (.docx)');
+            alert('Please upload your resume (.docx or .pdf)');
             return;
         }
 
@@ -237,6 +242,15 @@
     function renderResults(data) {
         clearTimeout(loadingInterval);
 
+        // Process Notes (image-heavy warnings, etc.)
+        const notes = data.process_notes || [];
+        if (notes.length > 0 && DOM.processNotesPanel) {
+            DOM.processNotesPanel.style.display = 'block';
+            DOM.processNotesText.innerHTML = notes.map(n => `<p>${escapeHtml(n)}</p>`).join('');
+        } else if (DOM.processNotesPanel) {
+            DOM.processNotesPanel.style.display = 'none';
+        }
+
         // Summary
         const company = data.research_summary?.company || 'your target role';
         const tone = data.research_summary?.cultural_tone || 'balanced';
@@ -309,9 +323,12 @@
         }
 
         if (dl.optimized_resume) {
-            const ext = dl.optimized_resume.endsWith('.pdf') ? '.pdf' : '.docx';
+            const fileType = data.file_type || 'docx';
+            const ext = fileType === 'pdf' ? '.pdf' : '.docx';
+            const icon = fileType === 'pdf' ? '📄' : '📄';
+            const label = fileType === 'pdf' ? 'Optimized Resume (PDF)' : 'Optimized Resume';
             downloadLinks.push(
-                `<a href="${dlHref(dl.optimized_resume, 'Optimized_Resume' + ext)}" class="btn-download" download>📄 Optimized Resume</a>`
+                `<a href="${dlHref(dl.optimized_resume, 'Optimized_Resume' + ext)}" class="btn-download" download>${icon} ${label}</a>`
             );
             downloadLinks.push(
                 `<button class="btn-whatsapp" onclick="shareToWhatsApp('${dl.optimized_resume}', 'Optimized Resume')">
@@ -446,6 +463,7 @@
         DOM.interviewPanel.style.display = 'none';
         DOM.coverLetterPanel.style.display = 'none';
         DOM.downloadsBar.style.display = 'none';
+        if (DOM.processNotesPanel) DOM.processNotesPanel.style.display = 'none';
     });
 
     DOM.errorRetryBtn.addEventListener('click', () => {
