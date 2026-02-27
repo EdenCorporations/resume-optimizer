@@ -54,3 +54,10 @@ Open [http://localhost:5001](http://localhost:5001) in your browser.
 ## License
 
 MIT
+
+---
+
+## Credits
+
+- **Ideated by:** [Fredrick Xavier](https://www.linkedin.com/in/fredrickxavier)
+- **Built by:** [EdenCorporations](https://github.com/EdenCorporations)
